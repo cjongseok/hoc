@@ -1,4 +1,4 @@
-package sfilter
+package hoc
 
 // Higher-Order Channel
 
