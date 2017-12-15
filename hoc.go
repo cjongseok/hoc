@@ -70,9 +70,12 @@ func Multiplex(in map[int32]chan interface{}, m Muxer, wg *sync.WaitGroup) chan 
 	return out
 }
 func MergeMuxer (in map[int32]chan interface{}, out chan interface{}, wg *sync.WaitGroup) {
-	wg.Add(1)
+	defer wg.Done()
+	mergedChanWg := sync.WaitGroup{}
 	for _, ch := range in {
+		mergedChanWg.Add(1)
 		go func(c chan interface{}) {
+			mergedChanWg.Done()
 			for {
 				select {
 				case x := <-c:
@@ -84,6 +87,10 @@ func MergeMuxer (in map[int32]chan interface{}, out chan interface{}, wg *sync.W
 			}
 		}(ch)
 	}
+	go func() {
+		mergedChanWg.Wait()
+		wg.Done()
+	}()
 }
 
 
