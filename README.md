@@ -12,6 +12,7 @@ TBD
 
 Helpers
 ----
-FilterChannel
-FilterDemuxed
-Demultiplex
+Filter: immutate data
+Converter: mutate data
+Muxer: immutate data
+Demuxer: immutate data

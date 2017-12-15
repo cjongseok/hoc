@@ -12,6 +12,7 @@ import (
 //type Filtered <-chan interface{}
 type Filter func(in chan interface{}, out chan interface{}, wg *sync.WaitGroup)
 func FilterChannel(in chan interface{}, f Filter, wg *sync.WaitGroup) chan interface{} {
+	wg.Add(1)
 	out := make(chan interface{})
 	go f(in, out, wg)
 	return out
@@ -19,6 +20,7 @@ func FilterChannel(in chan interface{}, f Filter, wg *sync.WaitGroup) chan inter
 func FilterDemuxed(in map[int32]chan interface{}, f Filter, wg *sync.WaitGroup) map[int32]chan interface{} {
 	out := make(map[int32]chan interface{})
 	for id, _ := range in {
+		wg.Add(1)
 		out[id] = make(chan interface{})
 		go f(in[id], out[id], wg)
 	}
@@ -27,16 +29,33 @@ func FilterDemuxed(in map[int32]chan interface{}, f Filter, wg *sync.WaitGroup) 
 func FilterDemuxedRespectively(in map[int32]chan interface{}, filterMap map[int32]Filter, wg *sync.WaitGroup) map[int32]chan interface{} {
 	out := make(map[int32]chan interface{})
 	for id, _ := range in {
+		wg.Add(1)
 		out[id] = make(chan interface{})
 		go filterMap[id](in[id], out[id], wg)
 	}
 	return out
 }
 
+type Converter Filter
+func ConvertChannel(in chan interface{}, c Converter, wg *sync.WaitGroup) chan interface{} {
+	return FilterChannel(in, Filter(c), wg)
+}
+func ConvertDemuxed(in map[int32]chan interface{}, c Converter, wg *sync.WaitGroup) map[int32]chan interface{} {
+	return FilterDemuxed(in, Filter(c), wg)
+}
+func ConvertDemuxedRespectively(in map[int32]chan interface{}, converterMap map[int32]Converter, wg *sync.WaitGroup) map[int32]chan interface{} {
+	filterMap := make(map[int32]Filter, len(converterMap))
+	for id, c := range converterMap {
+		filterMap[id] = Filter(c)
+	}
+	return FilterDemuxedRespectively(in, filterMap, wg)
+}
+
 type Demuxer func(in chan interface{}, out map[int32]chan interface{}, wg *sync.WaitGroup)
 func Demultiplex(in chan interface{}, d Demuxer, ids []int32, wg *sync.WaitGroup) map[int32]chan interface{} {
 	out := make(map[int32]chan interface{})
 	for _, id := range ids {
+		wg.Add(1)
 		out[id] = make(chan interface{})
 	}
 	go d(in, out, wg)
@@ -45,11 +64,13 @@ func Demultiplex(in chan interface{}, d Demuxer, ids []int32, wg *sync.WaitGroup
 
 type Muxer func(in map[int32]chan interface{}, out chan interface{}, wg *sync.WaitGroup)
 func Multiplex(in map[int32]chan interface{}, m Muxer, wg *sync.WaitGroup) chan interface{} {
+	wg.Add(1)
 	out := make(chan interface{})
 	go m(in, out, wg)
 	return out
 }
 func MergeMuxer (in map[int32]chan interface{}, out chan interface{}, wg *sync.WaitGroup) {
+	wg.Add(1)
 	for _, ch := range in {
 		go func(c chan interface{}) {
 			for {
@@ -64,6 +85,7 @@ func MergeMuxer (in map[int32]chan interface{}, out chan interface{}, wg *sync.W
 		}(ch)
 	}
 }
+
 
 type Pipeline struct {
 	In 		chan interface{}
@@ -91,6 +113,22 @@ func (pl *Pipeline) FilterDemuxedRespectively(in map[int32]chan interface{}, fil
 	pl.pipes = append(pl.pipes, out)
 	return out
 }
+func (pl *Pipeline) ConvertChannel(in chan interface{}, c Converter) chan interface{} {
+	out := ConvertChannel(in, c, pl.wg)
+	pl.pipes = append(pl.pipes, out)
+	return out
+}
+func (pl *Pipeline) ConvertDemuxed(in map[int32]chan interface{}, c Converter) map[int32]chan interface{} {
+	out := ConvertDemuxed(in, c, pl.wg)
+	pl.pipes = append(pl.pipes, out)
+	return out
+}
+func (pl *Pipeline) ConvertDemuxedRespectively(in map[int32]chan interface{}, converterMap map[int32]Converter) map[int32]chan interface{} {
+	out := ConvertDemuxedRespectively(in, converterMap, pl.wg)
+	pl.pipes = append(pl.pipes, out)
+	return out
+}
+
 func (pl *Pipeline) Demultiplex(in chan interface{}, d Demuxer, ids []int32) map[int32]chan interface{} {
 	out := Demultiplex(in, d, ids, pl.wg)
 	pl.pipes = append(pl.pipes, out)
