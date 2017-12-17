@@ -53,9 +53,9 @@ func ConvertDemuxedRespectively(in map[int32]chan interface{}, converterMap map[
 
 type Demuxer func(in chan interface{}, out map[int32]chan interface{}, wg *sync.WaitGroup)
 func Demultiplex(in chan interface{}, d Demuxer, ids []int32, wg *sync.WaitGroup) map[int32]chan interface{} {
+	wg.Add(1)
 	out := make(map[int32]chan interface{})
 	for _, id := range ids {
-		wg.Add(1)
 		out[id] = make(chan interface{})
 	}
 	go d(in, out, wg)
@@ -70,12 +70,11 @@ func Multiplex(in map[int32]chan interface{}, m Muxer, wg *sync.WaitGroup) chan 
 	return out
 }
 func MergeMuxer (in map[int32]chan interface{}, out chan interface{}, wg *sync.WaitGroup) {
-	defer wg.Done()
 	mergedChanWg := sync.WaitGroup{}
 	for _, ch := range in {
 		mergedChanWg.Add(1)
 		go func(c chan interface{}) {
-			mergedChanWg.Done()
+			defer mergedChanWg.Done()
 			for {
 				select {
 				case x := <-c:
@@ -88,8 +87,8 @@ func MergeMuxer (in map[int32]chan interface{}, out chan interface{}, wg *sync.W
 		}(ch)
 	}
 	go func() {
+		defer wg.Done()
 		mergedChanWg.Wait()
-		wg.Done()
 	}()
 }
 
@@ -146,7 +145,7 @@ func (pl *Pipeline) Multiplex(in map[int32]chan interface{}, m Muxer) chan inter
 	pl.pipes = append(pl.pipes, out)
 	return out
 }
-func (pl *Pipeline) Close() {
+func (pl *Pipeline) Close() *sync.WaitGroup{
 	close(pl.In)
 	for _, pipe := range pl.pipes {
 		switch p := pipe.(type) {
@@ -158,7 +157,9 @@ func (pl *Pipeline) Close() {
 			}
 		}
 	}
+	return pl.wg
 }
-func (pl *Pipeline) Wait() {
+func (pl *Pipeline) CloseAndWait() {
+	pl.Close()
 	pl.wg.Wait()
 }
