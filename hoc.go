@@ -9,29 +9,51 @@ import (
 // nil means End-Of-Channel(EOC)
 // EOC on a channel stops subordinate HOCs
 
+type Filter func(in interface{}) (out interface{}, err error)
+func filterLoop(in chan interface{}, out chan interface{}, f Filter, wg *sync.WaitGroup) {
+  defer wg.Done()
+  for {
+    select {
+    case x := <-in:
+      if x == nil {
+        return
+      }
+      o, err := f(x)
+      if err == nil && o != nil {
+        out <-o
+      }
+    }
+  }
+}
 //type Filtered <-chan interface{}
-type Filter func(in chan interface{}, out chan interface{}, wg *sync.WaitGroup)
+//type Filter func(in chan interface{}, out chan interface{}, wg *sync.WaitGroup)
 func FilterChannel(in chan interface{}, f Filter, wg *sync.WaitGroup) chan interface{} {
 	wg.Add(1)
 	out := make(chan interface{})
-	go f(in, out, wg)
+	//go f(in, out, wg)
+	go filterLoop(in, out, f, wg)
 	return out
 }
+//TODO: filter factory
 func FilterDemuxed(in map[int32]chan interface{}, f Filter, wg *sync.WaitGroup) map[int32]chan interface{} {
 	out := make(map[int32]chan interface{})
 	for id, _ := range in {
 		wg.Add(1)
 		out[id] = make(chan interface{})
-		go f(in[id], out[id], wg)
+		//go f(in[id], out[id], wg)
+		go filterLoop(in[id], out[id], f, wg)
 	}
 	return out
 }
 func FilterDemuxedRespectively(in map[int32]chan interface{}, filterMap map[int32]Filter, wg *sync.WaitGroup) map[int32]chan interface{} {
 	out := make(map[int32]chan interface{})
 	for id, _ := range in {
-		wg.Add(1)
-		out[id] = make(chan interface{})
-		go filterMap[id](in[id], out[id], wg)
+	  if f, ok := filterMap[id]; ok {
+      wg.Add(1)
+      out[id] = make(chan interface{})
+      //go filterMap[id](in[id], out[id], wg)
+      go filterLoop(in[id], out[id], f, wg)
+    }
 	}
 	return out
 }
@@ -51,47 +73,137 @@ func ConvertDemuxedRespectively(in map[int32]chan interface{}, converterMap map[
 	return FilterDemuxedRespectively(in, filterMap, wg)
 }
 
-type Demuxer func(in chan interface{}, out map[int32]chan interface{}, wg *sync.WaitGroup)
-func Demultiplex(in chan interface{}, d Demuxer, ids []int32, wg *sync.WaitGroup) map[int32]chan interface{} {
+const (
+  DstOfUnregisteredSrc = 0
+)
+type Demuxer func(in interface{}) (from int32, out interface{}, err error)
+func demuxerLoop(in chan interface{}, out map[int32]chan interface{}, d Demuxer, routeMap map[int32]int32, wg *sync.WaitGroup) {
+  defer wg.Done()
+  for {
+    select {
+    case x := <-in:
+      if x == nil {
+        return
+      }
+      from, o, err := d(x)
+      if err == nil && o != nil{
+        var ok bool
+        var dst int32
+        if dst, ok = routeMap[from]; !ok {
+          dst = DstOfUnregisteredSrc
+        }
+        if _, ok = out[dst]; ok {
+          out[dst] <-o
+        }
+      }
+    }
+  }
+}
+//type Demuxer func(in chan interface{}, out map[int32]chan interface{}, wg *sync.WaitGroup)
+func Demultiplex(in chan interface{}, d Demuxer, routeMap map[int32]int32, wg *sync.WaitGroup) map[int32]chan interface{} {
 	wg.Add(1)
 	out := make(map[int32]chan interface{})
-	for _, id := range ids {
-		out[id] = make(chan interface{})
+	for _, to := range routeMap {
+		out[to] = make(chan interface{})
 	}
-	go d(in, out, wg)
+	//go d(in, out, wg)
+	go demuxerLoop(in, out, d, routeMap, wg)
 	return out
 }
 
-type Muxer func(in map[int32]chan interface{}, out chan interface{}, wg *sync.WaitGroup)
-func Multiplex(in map[int32]chan interface{}, m Muxer, wg *sync.WaitGroup) chan interface{} {
+type ListMuxer func(index int, in interface{}) (out interface{}, err error)
+func listMuxerLoop(in []chan interface{}, out chan interface{}, m ListMuxer, wg *sync.WaitGroup) {
+  muxerWg := sync.WaitGroup{}
+  for index, ch := range in {
+    muxerWg.Add(1)
+    go func(c chan interface{}) {
+      defer muxerWg.Done()
+      for {
+        select {
+        case x := <-c:
+          if x == nil {
+            return
+          }
+          o, err := m(index, x)
+          if err == nil && o != nil {
+            out <-o
+          }
+        }
+      }
+    }(ch)
+  }
+  go func() {
+    defer wg.Done()
+    muxerWg.Wait()
+  }()
+}
+type MapMuxer func(port int32, in interface{}) (out interface{}, err error)
+//type Muxer func(in map[int32]chan interface{}, out chan interface{}, wg *sync.WaitGroup)
+func mapMuxerLoop(in map[int32]chan interface{}, out chan interface{}, m MapMuxer, wg *sync.WaitGroup) {
+  muxerWg := sync.WaitGroup{}
+  for port, ch := range in {
+    muxerWg.Add(1)
+    go func(c chan interface{}) {
+      defer muxerWg.Done()
+      for {
+        select {
+        case x := <-c:
+          if x == nil {
+            return
+          }
+          o, err := m(port, x)
+          if err == nil && o != nil {
+            out <-o
+          }
+        }
+      }
+    }(ch)
+  }
+  go func() {
+    defer wg.Done()
+    muxerWg.Wait()
+  }()
+}
+func MultiplexList(in []chan interface{}, m ListMuxer, wg *sync.WaitGroup) chan interface{} {
+  wg.Add(1)
+  out := make(chan interface{})
+  go listMuxerLoop(in, out, m, wg)
+  return out
+}
+func MultiplexMap(in map[int32]chan interface{}, m MapMuxer, wg *sync.WaitGroup) chan interface{} {
 	wg.Add(1)
 	out := make(chan interface{})
-	go m(in, out, wg)
+	//go m(in, out, wg)
+	go mapMuxerLoop(in, out, m, wg)
 	return out
 }
-func MergeMuxer (in map[int32]chan interface{}, out chan interface{}, wg *sync.WaitGroup) {
-	mergedChanWg := sync.WaitGroup{}
-	for _, ch := range in {
-		mergedChanWg.Add(1)
-		go func(c chan interface{}) {
-			defer mergedChanWg.Done()
-			for {
-				select {
-				case x := <-c:
-					if x == nil {
-						return
-					}
-					out <- x
-				}
-			}
-		}(ch)
-	}
-	go func() {
-		defer wg.Done()
-		mergedChanWg.Wait()
-	}()
+func MergeListMuxer(index int, in interface{}) (out interface{}, err error) {
+  return in, nil
 }
-
+func MergeMapMuxer(port int32, in interface{}) (out interface{}, err error) {
+  return in, nil
+//func MergeMuxer (in map[int32]chan interface{}, out chan interface{}, wg *sync.WaitGroup) {
+//	mergedChanWg := sync.WaitGroup{}
+//	for _, ch := range in {
+//		mergedChanWg.Add(1)
+//		go func(c chan interface{}) {
+//			defer mergedChanWg.Done()
+//			for {
+//				select {
+//				case x := <-c:
+//					if x == nil {
+//						return
+//					}
+//					out <- x
+				//}
+			//}
+		//}(ch)
+	//}
+	//go func() {
+	//	defer wg.Done()
+	//	mergedChanWg.Wait()
+	//}()
+}
 
 type Pipeline struct {
 	In 		chan interface{}
@@ -135,13 +247,18 @@ func (pl *Pipeline) ConvertDemuxedRespectively(in map[int32]chan interface{}, co
 	return out
 }
 
-func (pl *Pipeline) Demultiplex(in chan interface{}, d Demuxer, ids []int32) map[int32]chan interface{} {
-	out := Demultiplex(in, d, ids, pl.wg)
+func (pl *Pipeline) Demultiplex(in chan interface{}, d Demuxer, routeMap map[int32]int32) map[int32]chan interface{} {
+	out := Demultiplex(in, d, routeMap, pl.wg)
 	pl.pipes = append(pl.pipes, out)
 	return out
 }
-func (pl *Pipeline) Multiplex(in map[int32]chan interface{}, m Muxer) chan interface{} {
-	out := Multiplex(in, m, pl.wg)
+func (pl *Pipeline) MultiplexList(in []chan interface{}, m ListMuxer) chan interface{} {
+  out := MultiplexList(in, m, pl.wg)
+  pl.pipes = append(pl.pipes, out)
+  return out
+}
+func (pl *Pipeline) MultiplexMap(in map[int32]chan interface{}, m MapMuxer) chan interface{} {
+	out := MultiplexMap(in, m, pl.wg)
 	pl.pipes = append(pl.pipes, out)
 	return out
 }
